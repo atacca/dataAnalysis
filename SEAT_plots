@@ -1,0 +1,97 @@
+#### ###############################
+#### SEAT ANALYSIS #################
+#### ###############################
+
+library(tidyverse)
+library(lubridate)
+library(scales)
+
+
+#put all the files into one dataframe
+files <- list.files("files/", pattern = "csv", full.names = TRUE)
+df_files <- lapply(files, read.csv)
+df <- do.call("rbind", df_files)         #dataframe of combined csv files
+
+
+#### ##############################################
+#### SOME GENERAL VARIABLES TO HELP OUT ###########
+#### ##############################################
+
+columns <- colnames (df)        #lists out the column names
+df_summary <- summary(df)       #gives a summary of each column
+
+
+#### ###################################################
+#### START LOOKING AT THE DATA & PLOT AS WE GO #########
+#### ###################################################
+
+#### count tests by test code ##############
+count_tests <- n_distinct(df$testCode)
+
+
+#### count of Fluency Checks done/not done for each testCode ####
+
+#create a new data frame with just the testcodes and fluency results
+df_Fluency <- data.frame(df) %>%
+                select(c("testCode", "flCEFR")) %>%
+                transform(flCEFR = as.numeric(flCEFR))
+#strip the dataframe to 1 row for each testCode
+df_Fluency2 <- df_Fluency[match(unique(df_Fluency$testCode),
+                          df_Fluency$testCode),]
+#get counts for no FCs (result = 0) and FCs done (results > 0)
+count_ifDone <- sum(df_Fluency2$flCEFR > 0)                 
+count_ifNotDone <- sum(df_Fluency2$flCEFR==0)
+#new data frame for the tallies of Done/Not Done
+fcNames <- c("FC done", "FC not done")
+count_ifFluencyDone <- data.frame(c(count_ifDone, count_ifNotDone)) %>%
+                        cbind(fcNames) %>%
+                        rename(Count = "c.count_ifDone..count_ifNotDone.",
+                          If_Done = "fcNames")
+#Reorder the column and do the calcs for the piechart % now, rather than in ggplot
+count_ifFluencyDone <- count_ifFluencyDone[, c(2, 1)]
+#plot the results into a pie chart
+pie_FC <- ggplot(count_ifFluencyDone, aes("", Count, fill = If_Done)) +
+          ggtitle("Fluency Check done?") +
+          geom_col(position = "fill") +
+          theme(axis.text.x = element_blank(), axis.title.x = element_blank(),
+            axis.title.y = element_blank(), legend.title = element_blank()) +
+          geom_label(aes(label = paste0(round(Count / sum(Count) * 100), "%")),
+            position = position_fill(vjust = 0.5)) +
+          coord_polar(theta = "y")
+pie_FC
+
+
+
+#### Count of tests by sede ################
+
+#set the variable - filter by testCode and get counts by sede
+count_bySede <- df %>%
+                  group_by(sede) %>%
+                  summarise(n_distinct(testCode)) %>%
+                  rename(School = sede, Count = `n_distinct(testCode)`) %>%
+                  arrange(Count)
+#plot the test count by sede (bar plot)
+bp_countBySede <- ggplot(data = count_bySede, aes(x = reorder(School, -Count), y = Count)) +
+                  geom_bar(stat = "identity", fill = "steelblue") +
+                  geom_text(aes(label = Count), vjust = -0.3, size = 3.5) +
+                  labs(x = "School", y = "Number of Tests") +
+                  theme(axis.text.x = element_text(angle = 35, hjust = 1))
+bp_countBySede
+
+
+#### Plot tests taken over time ####
+
+#set variable - filter by dtStart, change to datetime format, arrange in chronological order
+tests_overTime <- distinct(df, dtStart) %>%
+                  rename(Date = dtStart) %>%
+                  mutate(Date = lubridate::dmy_hm(Date)) %>%
+                  arrange(Date) %>%
+                  mutate(Test_Number = row_number())   #this adds a column w/ row numbers
+#plot the tests over time (line plot)
+tests_overTime_xlabels <- c("nov", "dec", "jan", "feb", "mar", "apr", "jun")
+lp_TestsOverTime <- ggplot(data = tests_overTime, aes(x = Date, y = Test_Number)) +
+                    geom_line(color = "blue") +
+                    geom_point(shape = 20, size = 0.5) +
+                    labs(x = "Time", y = "Total Tests")
+lp_TestsOverTime
+
