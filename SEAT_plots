@@ -35,20 +35,25 @@ count_tests <- n_distinct(df$testCode)
 df_Fluency <- data.frame(df) %>%
                 select(c("testCode", "flCEFR")) %>%
                 transform(flCEFR = as.numeric(flCEFR))
+
 #strip the dataframe to 1 row for each testCode
 df_Fluency2 <- df_Fluency[match(unique(df_Fluency$testCode),
                           df_Fluency$testCode),]
+
 #get counts for no FCs (result = 0) and FCs done (results > 0)
 count_ifDone <- sum(df_Fluency2$flCEFR > 0)                 
 count_ifNotDone <- sum(df_Fluency2$flCEFR==0)
+
 #new data frame for the tallies of Done/Not Done
 fcNames <- c("FC done", "FC not done")
 count_ifFluencyDone <- data.frame(c(count_ifDone, count_ifNotDone)) %>%
                         cbind(fcNames) %>%
                         rename(Count = "c.count_ifDone..count_ifNotDone.",
                           If_Done = "fcNames")
+
 #Reorder the column and do the calcs for the piechart % now, rather than in ggplot
 count_ifFluencyDone <- count_ifFluencyDone[, c(2, 1)]
+
 #plot the results into a pie chart
 pie_FC <- ggplot(count_ifFluencyDone, aes("", Count, fill = If_Done)) +
           ggtitle("Fluency Check done?") +
@@ -70,6 +75,7 @@ count_bySede <- df %>%
                   summarise(n_distinct(testCode)) %>%
                   rename(School = sede, Count = `n_distinct(testCode)`) %>%
                   arrange(Count)
+
 #plot the test count by sede (bar plot)
 bp_countBySede <- ggplot(data = count_bySede, aes(x = reorder(School, -Count), y = Count)) +
                   geom_bar(stat = "identity", fill = "steelblue") +
@@ -87,6 +93,7 @@ tests_overTime <- distinct(df, dtStart) %>%
                   mutate(Date = lubridate::dmy_hm(Date)) %>%
                   arrange(Date) %>%
                   mutate(Test_Number = row_number())   #this adds a column w/ row numbers
+
 #plot the tests over time (line plot)
 tests_overTime_xlabels <- c("nov", "dec", "jan", "feb", "mar", "apr", "jun")
 lp_TestsOverTime <- ggplot(data = tests_overTime, aes(x = Date, y = Test_Number)) +
