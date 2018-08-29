@@ -1,1 +1,1 @@
-A place to dump my R code
+A place to dump my R code for data analytics
