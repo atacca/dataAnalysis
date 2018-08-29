@@ -1,60 +1,62 @@
-#### ###############################
-#### SEAT ANALYSIS #################
-#### ###############################
+#### ##########################################
+#### ANALYSIS OF TEST RESULTS #################
+#### ##########################################
 
 library(tidyverse)
+library(stringr)
+library(tidytext)
 library(lubridate)
 library(scales)
+library(openxlsx)
+library(wordcloud)
+library(reshape2)
 
 
-#put all the files into one dataframe
-files <- list.files("files/", pattern = "csv", full.names = TRUE)
-df_files <- lapply(files, read.csv)
-df <- do.call("rbind", df_files)         #dataframe of combined csv files
 
+### GET THE FILES AND CREATE A DF ###
+# create a list of files for different file types
+files_csv <- list.files(path = "inputs", pattern = "csv", full.names = TRUE)
+list_csv <- list()
+i = 1
+for (i in 1:length(files_csv)) {
+  x <- read.csv(files_csv[[i]], header = TRUE, sep = ",", na.strings = "NA")
+  list_csv[[i]] <- x
+  i = i + 1
+}
+df <- do.call(rbind, list_csv)
+df <- df %>%
+  mutate(linenumber = row_number())
 
-#### ##############################################
-#### SOME GENERAL VARIABLES TO HELP OUT ###########
-#### ##############################################
+df$timestamp <- dmy_hm(df$timestamp)    ## convert to proper format with lubridate
 
-columns <- colnames (df)        #lists out the column names
-df_summary <- summary(df)       #gives a summary of each column
+#################
+### ANALYSIS ####
+#################
 
-
-#### ###################################################
-#### START LOOKING AT THE DATA & PLOT AS WE GO #########
-#### ###################################################
-
-#### count tests by test code ##############
+# TEST COUNT#
 count_tests <- n_distinct(df$testCode)
+count_tests
 
 
-#### count of Fluency Checks done/not done for each testCode ####
-
-#create a new data frame with just the testcodes and fluency results
+# FLUENCY CHECK DONE/NOT DONE #
 df_Fluency <- data.frame(df) %>%
                 select(c("testCode", "flCEFR")) %>%
-                transform(flCEFR = as.numeric(flCEFR))
-
-#strip the dataframe to 1 row for each testCode
+                transform(flCEFR = as.numeric(flCEFR))    ## new df with relevant cols
+                
 df_Fluency2 <- df_Fluency[match(unique(df_Fluency$testCode),
-                          df_Fluency$testCode),]
+                          df_Fluency$testCode), ]    ## reduce to 1 row per test code
 
-#get counts for no FCs (result = 0) and FCs done (results > 0)
 count_ifDone <- sum(df_Fluency2$flCEFR > 0)                 
 count_ifNotDone <- sum(df_Fluency2$flCEFR==0)
 
-#new data frame for the tallies of Done/Not Done
-fcNames <- c("FC done", "FC not done")
+fcNames <- c("FC done", "FC not done")    ## col names for the below df
 count_ifFluencyDone <- data.frame(c(count_ifDone, count_ifNotDone)) %>%
                         cbind(fcNames) %>%
                         rename(Count = "c.count_ifDone..count_ifNotDone.",
-                          If_Done = "fcNames")
+                          If_Done = "fcNames")    ## new df for the tallies
 
-#Reorder the column and do the calcs for the piechart % now, rather than in ggplot
-count_ifFluencyDone <- count_ifFluencyDone[, c(2, 1)]
+count_ifFluencyDone <- count_ifFluencyDone[, c(2, 1)]    ## reorder the df
 
-#plot the results into a pie chart
 pie_FC <- ggplot(count_ifFluencyDone, aes("", Count, fill = If_Done)) +
           ggtitle("Fluency Check done?") +
           geom_col(position = "fill") +
@@ -66,17 +68,13 @@ pie_FC <- ggplot(count_ifFluencyDone, aes("", Count, fill = If_Done)) +
 pie_FC
 
 
-
-#### Count of tests by sede ################
-
-#set the variable - filter by testCode and get counts by sede
+# COUNT OF TESTS BY SEDE #
 count_bySede <- df %>%
                   group_by(sede) %>%
                   summarise(n_distinct(testCode)) %>%
                   rename(School = sede, Count = `n_distinct(testCode)`) %>%
-                  arrange(Count)
+                  arrange(Count)    ## new df filtered by test code, counts by sede
 
-#plot the test count by sede (bar plot)
 bp_countBySede <- ggplot(data = count_bySede, aes(x = reorder(School, -Count), y = Count)) +
                   geom_bar(stat = "identity", fill = "steelblue") +
                   geom_text(aes(label = Count), vjust = -0.3, size = 3.5) +
@@ -85,20 +83,86 @@ bp_countBySede <- ggplot(data = count_bySede, aes(x = reorder(School, -Count), y
 bp_countBySede
 
 
-#### Plot tests taken over time ####
-
-#set variable - filter by dtStart, change to datetime format, arrange in chronological order
+# TESTS TAKEN OVER TIME #
 tests_overTime <- distinct(df, dtStart) %>%
                   rename(Date = dtStart) %>%
                   mutate(Date = lubridate::dmy_hm(Date)) %>%
                   arrange(Date) %>%
-                  mutate(Test_Number = row_number())   #this adds a column w/ row numbers
+                  mutate(Test_Number = row_number())    ## filter, change DT format, reorder
 
-#plot the tests over time (line plot)
-tests_overTime_xlabels <- c("nov", "dec", "jan", "feb", "mar", "apr", "jun")
 lp_TestsOverTime <- ggplot(data = tests_overTime, aes(x = Date, y = Test_Number)) +
                     geom_line(color = "blue") +
                     geom_point(shape = 20, size = 0.5) +
+                    scale_x_datetime(breaks = date_breaks("1 months"),
+                                     labels = date_format(format = "%b")) +
                     labs(x = "Time", y = "Total Tests")
 lp_TestsOverTime
+
+
+# FEEDBACK #
+#### These next 6 lines are just to get the feedback column into its own df and formatted for
+#### unnesting. It's way too much work as it keeps going back and forth as factors. Need to find
+#### a better way to do it.
+df_feedback <- data.frame(df$feedback, stringsAsFactors = FALSE)
+colnames(df_feedback) <- paste("feedback")
+df_feedback <- df_feedback[match(unique(df_feedback$feedback), df_feedback$feedback), ]
+df_feedback <- data.frame(df_feedback, stringsAsFactors = FALSE)
+colnames(df_feedback) <- paste("feedback")
+df_feedback$feedback <- as.character(df_feedback$feedback)
+
+df_feedback <- df_feedback %>%
+  unnest_tokens(word, feedback)
+
+default_stopwords <- unnest_tokens(read.csv("default_stopwords.csv",
+                      stringsAsFactors = FALSE), word, word) %>%
+                      as_tibble()
+
+df_feedback_noStops <- df_feedback %>%
+  anti_join(default_stopwords, by = "word")
+
+feedback_wordFreq <- count(df_feedback_noStops, word, sort = TRUE)
+
+# wordcloud
+feedback_wordcloud <- df_feedback_noStops %>%
+  count(word) %>%
+  with(wordcloud(word, n, max.words = 150))
+
+feedback_wordcloud_comparison <- df_feedback_noStops %>%
+  inner_join(get_sentiments("bing")) %>%
+  count(word, sentiment, sort = TRUE) %>%
+  acast(word ~ sentiment, value.var = "n", fill = 0) %>%
+  comparison.cloud(colors = c("green", "red"), max.words = 160,
+                    title.size = 1.5)
+
+
+# TIMES TAKEN TO COMPLETE #
+#create new dataframe with testCode and timestamp, convert to datetime, then order by code>time
+df_timestamp <- df %>%
+                  select(c("testCode", "timestamp"))
+df_timestamp <- df_timestamp[with(df_timestamp, order(testCode, timestamp)), ]    
+
+times_started <- df_timestamp[!duplicated(df_timestamp$testCode, fromLast = FALSE), "timestamp"]
+times_finished <- df_timestamp[!duplicated(df_timestamp$testCode, fromLast = TRUE), "timestamp"]
+
+test_times <- data.frame(times_started, times_finished)
+
+# loop through each row, calc time diff, add result to df
+test_lengths_list <- list()
+i <- 1
+for (i in 1:nrow(test_times)) {
+  x <- test_times$times_finished[i] - test_times$times_started[i]
+  test_lengths_list[[i]] <- x
+  i <- i + 1
+}
+test_lengths <- do.call(rbind, test_lengths_list)
+
+# combine the start & finish times with the time difference between the two
+time_taken <- cbind(test_times, test_lengths)
+
+#plot (note: width throws an error, but still plots)
+ggplot(data = time_taken, aes(x = test_lengths)) +
+  geom_bar(fill = "blue", width = 0.8) +
+  labs(x = "Length of Test", y = "Count of Tests") +
+  scale_x_continuous(breaks = c(0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55)) +
+  scale_y_continuous(breaks = c(0, 25, 50, 75, 100, 125, 150, 175, 200, 225, 250, 275))
 
