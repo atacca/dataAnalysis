@@ -2,40 +2,150 @@
 #### ANALYSIS OF TEST RESULTS #################
 #### ##########################################
 
-library(tidyverse)
+#library(tidyverse)
 library(stringr)
+library(dplyr)
 library(tidytext)
 library(lubridate)
 library(scales)
 library(openxlsx)
 library(wordcloud)
+library(RColorBrewer)
 library(reshape2)
+library(ggplot2)
+library(gridExtra)
+library(cowplot)
+library(ggpubr)
+library(RMySQL)
 
 
+### SQL QUERY TO CREATE THE DATA FRAME ###
+#removed#
 
-### GET THE FILES AND CREATE A DF ###
-# create a list of files for different file types
-files_csv <- list.files(path = "inputs", pattern = "csv", full.names = TRUE)
-list_csv <- list()
-i = 1
-for (i in 1:length(files_csv)) {
-  x <- read.csv(files_csv[[i]], header = TRUE, sep = ",", na.strings = "NA")
-  list_csv[[i]] <- x
-  i = i + 1
-}
-df <- do.call(rbind, list_csv)
+
+##### ###################
+### TIDY UP FROM IMPORT
+##### ###################
+
+# Format dates for sql import
 df <- df %>%
   mutate(linenumber = row_number())
+df$timestamp <- as.POSIXct(df$timestamp)
+df$dtStart <- as.POSIXct(df$dtStart)
 
-df$timestamp <- dmy_hm(df$timestamp)    ## convert to proper format with lubridate
+#change the sede names that either aren't relevant anymore (keep an eye on this, may be temp)
+df$sede <- gsub("^\\*", "", df$sede)
+df$sede <- gsub("Roma Spagna", "Roma Prati", df$sede)
 
-#################
-### ANALYSIS ####
-#################
+#add a new column to the base df with the time the test was done/started
+#start with a df with the columns needed
+time_testsDone <- df %>%
+  select(c("testCode", "sede", "timestamp"))
+#order the df by testcode and then time (we'll take the first question timestamp for simplicity)
+time_testsDone <- time_testsDone[with(time_testsDone, order(testCode, timestamp)), ]
+#remove duplicates, leaving the 1st entry
+time_testsDone <- data.frame(time_testsDone[!duplicated(time_testsDone$testCode), ]) %>%
+  rename(time_Done = timestamp)
+time_testsDone$time_Done <- as.POSIXct(format(time_testsDone$time_Done, "%Y-%m-%d"))
 
-# TEST COUNT#
+#now the time_Done column will be added to the base df
+df$time_Done <- time_testsDone$time_Done[match(df$testCode, time_testsDone$testCode)]
+
+
+##### ###########
+### ANALYSIS
+##### ###########
+
+# TEST COUNT  (n_distinct is the same as length(unique(df$col)))
 count_tests <- n_distinct(df$testCode)
 count_tests
+
+
+# COUNT OF TESTS BY SEDE #
+count_bySede <- df %>%
+                  group_by(sede) %>%
+                  summarise(n_distinct(testCode)) %>%
+                  rename(Count = `n_distinct(testCode)`) %>%
+                  arrange(Count)    ## new df filtered by test code, counts by sede
+
+plot_countBySede <- ggplot(data = count_bySede, aes(x = reorder(sede, -Count), y = Count)) +
+                  geom_bar(stat = "identity", fill = "steelblue") +
+                  geom_text(aes(label = Count), vjust = -0.3, size = 3.5) +
+                  labs(title = "Number of tests completed by sede") +
+                  labs(x = "Sede", y = "Number of Tests") +
+                  theme(axis.text.x = element_text(angle = 35, hjust = 1))
+plot_countBySede
+
+
+# COUNT OF TESTS TODAY BY SEDE #
+#using the time_testsDone dataframe that was created at the start
+#now to start the count. first to strip the hours from the timestamp
+count_testsDoneToday <- time_testsDone
+count_testsDoneToday <- count_testsDoneToday %>%
+  filter(time_Done == format(Sys.Date())) %>%
+  count(sede) %>%
+  rename(Count = n) %>%
+  arrange(desc(Count))
+count_testsDoneToday
+
+
+# TESTS TAKEN OVER TIME #
+tests_overTime <- df[!duplicated(df$testCode), ] %>%
+                  rename(Date = time_Done) %>%
+                  arrange(Date) %>%
+                  mutate(Test_Number = row_number())    ## filter, change DT format, reorder
+
+plot_TestsOverTime <- ggplot(data = tests_overTime, aes(x = Date, y = Test_Number)) +
+                    geom_line(color = "blue") +
+                    geom_point(shape = 20, size = 0.5) +
+                    scale_x_datetime(breaks = date_breaks("1 months"),
+                                     labels = date_format(format = "%b")) +
+                    labs(x = "Time", y = "Total Tests")
+plot_TestsOverTime
+
+
+### CALCULATE THE TIMES TAKEN TO COMPLETE #
+#create new dataframe with testCode and timestamp, convert to datetime, then order by code>time
+df_timestamp <- df %>%
+  select(c("testCode", "timestamp"))
+
+df_timestamp <- df_timestamp[with(df_timestamp, order(testCode, timestamp)), ]    
+times_started <- df_timestamp[!duplicated(df_timestamp$testCode,
+                                          fromLast = FALSE),  "timestamp"]
+times_finished <- df_timestamp[!duplicated(df_timestamp$testCode,
+                                           fromLast = TRUE), "timestamp"]
+test_times <- data.frame(times_started, times_finished)
+
+# loop through each row, calc time diff, add result to df
+test_lengths_list <- list()
+i <- 1
+for (i in 1:nrow(test_times)) {
+  x <- test_times$times_finished[i] - test_times$times_started[i]
+  test_lengths_list[[i]] <- x
+  i <- i + 1
+}
+test_lengths <- do.call(rbind, test_lengths_list)
+
+# combine the start & finish times with the time difference between the two
+time_taken <- cbind(test_times, test_lengths)
+time_taken <- time_taken %>%
+  rename(times = "test_lengths")
+time_taken$times <- round(time_taken$times, digits = 1)
+
+# get average time to complete, and reformat to time
+test_lengths_avg <- as.duration(mean(test_lengths))
+# make a label with the average, to place on the plot
+text_for_plot_avg <- paste0("Average = ", round(test_lengths_avg, digits = 2))
+
+ggplot(data = time_taken, aes(x = time_taken$times)) +
+  geom_bar(fill = "blue", width = 0.5) +
+  geom_vline(xintercept = mean(time_taken$times), color = "red") +
+  labs(title = "Times taken to complete the SEAT") +
+  labs(x = "Length of Test", y = "Count of Tests") +
+  annotate("text", x = 35, y = 75, label = text_for_plot_avg) +
+  scale_x_continuous(breaks = seq(from = 0,
+                                      to = ceiling(max(time_taken$times)) + 10, by = 5)) +
+  scale_y_continuous(breaks = seq(from = 0, to = 100, by = 25))
 
 
 # FLUENCY CHECK DONE/NOT DONE #
@@ -68,37 +178,6 @@ pie_FC <- ggplot(count_ifFluencyDone, aes("", Count, fill = If_Done)) +
 pie_FC
 
 
-# COUNT OF TESTS BY SEDE #
-count_bySede <- df %>%
-                  group_by(sede) %>%
-                  summarise(n_distinct(testCode)) %>%
-                  rename(School = sede, Count = `n_distinct(testCode)`) %>%
-                  arrange(Count)    ## new df filtered by test code, counts by sede
-
-bp_countBySede <- ggplot(data = count_bySede, aes(x = reorder(School, -Count), y = Count)) +
-                  geom_bar(stat = "identity", fill = "steelblue") +
-                  geom_text(aes(label = Count), vjust = -0.3, size = 3.5) +
-                  labs(x = "School", y = "Number of Tests") +
-                  theme(axis.text.x = element_text(angle = 35, hjust = 1))
-bp_countBySede
-
-
-# TESTS TAKEN OVER TIME #
-tests_overTime <- distinct(df, dtStart) %>%
-                  rename(Date = dtStart) %>%
-                  mutate(Date = lubridate::dmy_hm(Date)) %>%
-                  arrange(Date) %>%
-                  mutate(Test_Number = row_number())    ## filter, change DT format, reorder
-
-lp_TestsOverTime <- ggplot(data = tests_overTime, aes(x = Date, y = Test_Number)) +
-                    geom_line(color = "blue") +
-                    geom_point(shape = 20, size = 0.5) +
-                    scale_x_datetime(breaks = date_breaks("1 months"),
-                                     labels = date_format(format = "%b")) +
-                    labs(x = "Time", y = "Total Tests")
-lp_TestsOverTime
-
-
 # FEEDBACK #
 #### These next 6 lines are just to get the feedback column into its own df and formatted for
 #### unnesting. It's way too much work as it keeps going back and forth as factors. Need to find
@@ -120,7 +199,9 @@ default_stopwords <- unnest_tokens(read.csv("default_stopwords.csv",
 df_feedback_noStops <- df_feedback %>%
   anti_join(default_stopwords, by = "word")
 
+# Word frequency count
 feedback_wordFreq <- count(df_feedback_noStops, word, sort = TRUE)
+feedback_wordFreq
 
 # wordcloud
 feedback_wordcloud <- df_feedback_noStops %>%
@@ -135,34 +216,159 @@ feedback_wordcloud_comparison <- df_feedback_noStops %>%
                     title.size = 1.5)
 
 
-# TIMES TAKEN TO COMPLETE #
-#create new dataframe with testCode and timestamp, convert to datetime, then order by code>time
-df_timestamp <- df %>%
-                  select(c("testCode", "timestamp"))
-df_timestamp <- df_timestamp[with(df_timestamp, order(testCode, timestamp)), ]    
 
-times_started <- df_timestamp[!duplicated(df_timestamp$testCode, fromLast = FALSE), "timestamp"]
-times_finished <- df_timestamp[!duplicated(df_timestamp$testCode, fromLast = TRUE), "timestamp"]
+# AVERAGE RESPONSE TIME BY SECTION #
+## this sounds so lazy, but...I set it up to filter by a section and get the times, with the intent
+## to see if it worked, then rework it so all 4 sections would get looped through with filters...
+## but to save time I'm just copying and pasting the code 3 times, then combining all results after..
 
-test_times <- data.frame(times_started, times_finished)
+### MC SECTION ###
+# starting with a trial dataset in a separate df, then will build a full one
+df_mc <- df %>% filter(section == "MC") %>%
+  select(c("testCode", "qNum", "timestamp", "section"))
+ 
+# order the results by code then timestamp
+df_mc <- df_mc[with(df_mc, order(testCode, timestamp)), ]
 
-# loop through each row, calc time diff, add result to df
-test_lengths_list <- list()
-i <- 1
-for (i in 1:nrow(test_times)) {
-  x <- test_times$times_finished[i] - test_times$times_started[i]
-  test_lengths_list[[i]] <- x
+#take the first and last times for each test code, then combine
+mc_times_started <- df_mc[!duplicated(df_mc$testCode, fromLast = FALSE), ]
+mc_times_finished <- df_mc[!duplicated(df_mc$testCode, fromLast = TRUE), ]
+
+mc_timestamps <- data.frame(mc_times_started, finished = mc_times_finished$timestamp)
+
+# get the time difference between each start and finish times
+mc_times_list <- list()
+
+for (i in 1:nrow(mc_timestamps)) {
+  x <- mc_timestamps$finished[i] - mc_timestamps$timestamp[i]
+  mc_times_list[[i]] <- x
   i <- i + 1
 }
-test_lengths <- do.call(rbind, test_lengths_list)
+mc_times <- data.frame(MC = do.call(rbind, mc_times_list))
 
-# combine the start & finish times with the time difference between the two
-time_taken <- cbind(test_times, test_lengths)
+### SC SECTION ###
+# starting with a trial dataset in a separate df, then will build a full one
+df_sc <- df %>% filter(section == "SC") %>%
+  select(c("testCode", "qNum", "timestamp", "section"))
+ 
+# order the results by code then timestamp
+df_sc <- df_sc[with(df_sc, order(testCode, timestamp)), ]
 
-#plot (note: width throws an error, but still plots)
-ggplot(data = time_taken, aes(x = test_lengths)) +
-  geom_bar(fill = "blue", width = 0.8) +
-  labs(x = "Length of Test", y = "Count of Tests") +
-  scale_x_continuous(breaks = c(0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55)) +
-  scale_y_continuous(breaks = c(0, 25, 50, 75, 100, 125, 150, 175, 200, 225, 250, 275))
+#take the first and last times for each test code, then combine
+sc_times_started <- df_sc[!duplicated(df_sc$testCode, fromLast = FALSE), ]
+sc_times_finished <- df_sc[!duplicated(df_sc$testCode, fromLast = TRUE), ]
+
+sc_timestamps <- data.frame(sc_times_started, finished = sc_times_finished$timestamp)
+
+# get the time difference between each start and finish times
+sc_times_list <- list()
+
+for (i in 1:nrow(sc_timestamps)) {
+  x <- sc_timestamps$finished[i] - sc_timestamps$timestamp[i]
+  sc_times_list[[i]] <- x
+  i <- i + 1
+}
+sc_times <- data.frame(SC = do.call(rbind, sc_times_list))
+
+### WO SECTION ###
+# starting with a trial dataset in a separate df, then will build a full one
+df_wo <- df %>% filter(section == "WO") %>%
+  select(c("testCode", "qNum", "timestamp", "section"))
+ 
+# order the results by code then timestamp
+df_wo <- df_wo[with(df_wo, order(testCode, timestamp)), ]
+
+#take the first and last times for each test code, then combine
+wo_times_started <- df_wo[!duplicated(df_wo$testCode, fromLast = FALSE), ]
+wo_times_finished <- df_wo[!duplicated(df_wo$testCode, fromLast = TRUE), ]
+
+wo_timestamps <- data.frame(wo_times_started, finished = wo_times_finished$timestamp)
+
+# get the time difference between each start and finish times
+wo_times_list <- list()
+
+for (i in 1:nrow(wo_timestamps)) {
+  x <- wo_timestamps$finished[i] - wo_timestamps$timestamp[i]
+  wo_times_list[[i]] <- x
+  i <- i + 1
+}
+wo_times <- data.frame(WO = do.call(rbind, wo_times_list))
+
+### LI SECTION ###
+# starting with a trial dataset in a separate df, then will build a full one
+df_li <- df %>% filter(section == "LI") %>%
+  select(c("testCode", "qNum", "timestamp", "section"))
+ 
+# order the results by code then timestamp
+df_li <- df_li[with(df_li, order(testCode, timestamp)), ]
+
+#take the first and last times for each test code, then combine
+li_times_started <- df_li[!duplicated(df_li$testCode, fromLast = FALSE), ]
+li_times_finished <- df_li[!duplicated(df_li$testCode, fromLast = TRUE), ]
+
+li_timestamps <- data.frame(li_times_started, finished = li_times_finished$timestamp)
+
+# get the time difference between each start and finish times, make a df for ggplot
+li_times_list <- list()
+
+for (i in 1:nrow(li_timestamps)) {
+  x <- li_timestamps$finished[i] - li_timestamps$timestamp[i]
+  li_times_list[[i]] <- x
+  i <- i + 1
+}
+li_times <- data.frame(LI = do.call(rbind, li_times_list))
+
+## PLOT THE 4 SECTIONS TOGETHER ##
+# multiple choice histogram
+mc_hist <- ggplot(data = mc_times, aes(mc_times$MC)) +
+  geom_histogram(binwidth = 1,
+                  col = "blue",
+                  fill = "blue",
+                  alpha = 0.5) +
+  stat_count(aes(y = ..count.., label = ..count..), geom = "text", size = 2.5, vjust = -1) +
+  labs(x = "Multiple Choice", y = "count", size =1) +
+  xlim(c(min(mc_times) - 1, max(mc_times) ))
+
+# sentence completion histogram
+sc_hist <- ggplot(data = sc_times, aes(sc_times$SC)) +
+  geom_histogram(binwidth = 1,
+                  col = "red",
+                  fill = "red",
+                  alpha = 0.5) +
+  stat_count(aes(y = ..count.., label = ..count..), geom = "text", size = 2.5, vjust = -1) +
+  labs(x = "Sentence Completion", y = "count") +
+  xlim(c(min(sc_times) - 1, max(sc_times) ))
+
+# word order histogram
+wo_hist <- ggplot(data = wo_times, aes(wo_times$WO)) +
+  geom_histogram(binwidth = 1,
+                  col = "green",
+                  fill = "green",
+                  alpha = 0.5) +
+  stat_count(aes(y = ..count.., label = ..count..), geom = "text", size = 2.5, vjust = -1) +
+  labs(x = "Word Order", y = "count") +
+  xlim(c(min(wo_times) - 1, max(wo_times) ))
+
+# listening histogram
+li_hist <- ggplot(data = li_times, aes(li_times$LI)) +
+  geom_histogram(binwidth = 1,
+                  col = "grey",
+                  fill = "grey",
+                  alpha = 0.5) +
+  stat_count(aes(y = ..count.., label = ..count..), geom = "text", size = 2.5, vjust = -1) + 
+  labs(x = "Listening", y = "count") +
+  xlim(c(min(li_times) - 1, max(li_times) ))
+
+# plot together (using ggpubr)
+section_times_plot <- ggarrange(mc_hist, sc_hist, wo_hist, li_hist, ncol = 2, nrow = 2)
+annotate_figure(section_times_plot,
+                  top = text_grob("Time taken to complete each section",
+                    color = "red", face = "bold", size = 12))
+
+## NUMBER OF QUESTIONS ASKED PER TEST SECTION ##
+##WIP##
+
+
+
+
 
