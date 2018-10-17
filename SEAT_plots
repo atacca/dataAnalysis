@@ -37,71 +37,29 @@ df$dtStart <- as.POSIXct(df$dtStart)
 df$sede <- gsub("^\\*", "", df$sede)
 df$sede <- gsub("Roma Spagna", "Roma Prati", df$sede)
 
-#add a new column to the base df with the time the test was done/started
-#start with a df with the columns needed
-time_testsDone <- df %>%
-  select(c("testCode", "sede", "timestamp"))
-#order the df by testcode and then time (we'll take the first question timestamp for simplicity)
-time_testsDone <- time_testsDone[with(time_testsDone, order(testCode, timestamp)), ]
-#remove duplicates, leaving the 1st entry
-time_testsDone <- data.frame(time_testsDone[!duplicated(time_testsDone$testCode), ]) %>%
-  rename(time_Done = timestamp)
-time_testsDone$time_Done <- as.POSIXct(format(time_testsDone$time_Done, "%Y-%m-%d"))
+# get a test count of unfinished tests (where finalRes == 0) (this needs to happen before they're filtered out)
+count_unfinishedTests <- df[!duplicated(df$testCode), ] %>%
+  filter(finalRes == 0) 
+count_unfinishedTests <- n_distinct(count_unfinishedTests$testCode)
+paste0("Number of unfinished tests = ", count_unfinishedTests)
 
-#now the time_Done column will be added to the base df
-df$time_Done <- time_testsDone$time_Done[match(df$testCode, time_testsDone$testCode)]
+#filter out any unfinished tests (where finalRes == 0)
+df <- df %>%
+  filter(!finalRes == 0)
+
+### NEW COLUMNS ADDED TO DF RELATING TO TIMES COMPLETED, CODE IS UNDER 'TIMES TAKEN TO COMPLETE' ###
 
 
 ##### ###########
 ### ANALYSIS
 ##### ###########
 
-# TEST COUNT  (n_distinct is the same as length(unique(df$col)))
+# TEST COUNT  (n_distinct is the same as length(unique(df$col))) (unfinished test count happens earlier)
 count_tests <- n_distinct(df$testCode)
-count_tests
+paste0("Number of finished tests: ", count_tests)
 
 
-# COUNT OF TESTS BY SEDE #
-count_bySede <- df %>%
-                  group_by(sede) %>%
-                  summarise(n_distinct(testCode)) %>%
-                  rename(Count = `n_distinct(testCode)`) %>%
-                  arrange(Count)    ## new df filtered by test code, counts by sede
-
-plot_countBySede <- ggplot(data = count_bySede, aes(x = reorder(sede, -Count), y = Count)) +
-                  geom_bar(stat = "identity", fill = "steelblue") +
-                  geom_text(aes(label = Count), vjust = -0.3, size = 3.5) +
-                  labs(title = "Number of tests completed by sede") +
-                  labs(x = "Sede", y = "Number of Tests") +
-                  theme(axis.text.x = element_text(angle = 35, hjust = 1))
-plot_countBySede
-
-
-# COUNT OF TESTS TODAY BY SEDE #
-#using the time_testsDone dataframe that was created at the start
-#now to start the count. first to strip the hours from the timestamp
-count_testsDoneToday <- time_testsDone
-count_testsDoneToday <- count_testsDoneToday %>%
-  filter(time_Done == format(Sys.Date())) %>%
-  count(sede) %>%
-  rename(Count = n) %>%
-  arrange(desc(Count))
-count_testsDoneToday
-
-
-# TESTS TAKEN OVER TIME #
-tests_overTime <- df[!duplicated(df$testCode), ] %>%
-                  rename(Date = time_Done) %>%
-                  arrange(Date) %>%
-                  mutate(Test_Number = row_number())    ## filter, change DT format, reorder
-
-plot_TestsOverTime <- ggplot(data = tests_overTime, aes(x = Date, y = Test_Number)) +
-                    geom_line(color = "blue") +
-                    geom_point(shape = 20, size = 0.5) +
-                    scale_x_datetime(breaks = date_breaks("1 months"),
-                                     labels = date_format(format = "%b")) +
-                    labs(x = "Time", y = "Total Tests")
-plot_TestsOverTime
+### COUNT OF TESTS DONE TODAY IS LOWER, UNDER THE 'TIMES TAKEN TO COMPLETE' (NEED TO USE AN OBJECT CREATED LOWER) ###
 
 
 ### CALCULATE THE TIMES TAKEN TO COMPLETE #
@@ -116,11 +74,41 @@ times_finished <- df_timestamp[!duplicated(df_timestamp$testCode,
                                            fromLast = TRUE), "timestamp"]
 test_times <- data.frame(times_started, times_finished)
 
+
+# ADD NEW COLUMNS RELATING TO WHEN COMPLETED AND IF FINISHED ON A DIFFERENT DAY (doesn't build upon the test_times
+# object, uses a new one, adding the testCode and new time columns w/o HMS. Making it confusing now, will clean up l8)
+time_testsDone <- df %>%
+  select(c("testCode", "sede", "timestamp"))
+#order the df by testcode and then time (we'll take the first question timestamp for simplicity)
+time_testsDone <- time_testsDone[with(time_testsDone, order(testCode, timestamp)), ]
+#remove duplicates, leaving the 1st entry (i.e. the 1st question time) and strip HMS
+time_testsDone <- data.frame(time_testsDone[!duplicated(time_testsDone$testCode), ]) %>%
+  rename(firstQ = timestamp)
+time_testsDone$firstQ <- as.POSIXct(format(time_testsDone$firstQ, format = "%Y-%m-%d"))
+#add a column for the last time and strip HM
+time_testsDone$lastQ <- times_finished
+time_testsDone$lastQ <- as.POSIXct(format(time_testsDone$lastQ, format = "%Y-%m-%d"))
+
+# check if tests started & finished on the same day, add a new column for them
+for (i in 1:nrow(time_testsDone)) {
+  if (time_testsDone$firstQ[i] == time_testsDone$lastQ[i]) {
+    time_testsDone$finishedSameDay[i] = "YES" }
+      else {
+        time_testsDone$finishedSameDay[i] = "NO"
+      }
+  i = i + 1
+}
+
+
+## NOW TO CALCULATE THE TIME TAKEN FOR A TEST. REMOVED ARE TESTS STARTED ON 1 DAY AND COMPLETED ON ANOTHER ##
+# I'll cbind time_testsDone w/ test_times, to put all the info together. Sure it didn't need to be 2 objects, TO FIX
+test_times <- cbind(time_testsDone, test_times)
+
 # loop through each row, calc time diff, add result to df
 test_lengths_list <- list()
 i <- 1
 for (i in 1:nrow(test_times)) {
-  x <- test_times$times_finished[i] - test_times$times_started[i]
+  x <- difftime(test_times$times_finished[i], test_times$times_started[i], units = "mins")
   test_lengths_list[[i]] <- x
   i <- i + 1
 }
@@ -132,20 +120,92 @@ time_taken <- time_taken %>%
   rename(times = "test_lengths")
 time_taken$times <- round(time_taken$times, digits = 1)
 
+#now remove the tests that started and finished in more than 60mins 
+time_taken_filteredToSixty <- time_taken %>%
+  filter(times < 60)
+  
+#now remove the tests that started and finished in less than 60mins 
+time_taken_filteredLong <- time_taken %>%
+  filter(times > 60)
+
+
+# LET's PUT THE NEW COLUMNS BACK INTO THE BASE DF (firstQ, lastQ, finishedSameDay, times) TO KEEP EVERYTHING TOGETHER
+df$firstQ <- time_testsDone$firstQ[match(df$testCode, time_testsDone$testCode)]
+df$lastQ <- time_testsDone$lastQ[match(df$testCode, time_testsDone$testCode)]
+df$finishedSameDay <- time_testsDone$finishedSameDay[match(df$testCode, time_testsDone$testCode)]
+df$minutesToComplete <- time_taken$times[match(df$testCode, time_taken$testCode)]
+
+
+# PLOT THE TIMES TAKEN TO COMPLETE
 # get average time to complete, and reformat to time
-test_lengths_avg <- as.duration(mean(test_lengths))
+test_lengths_avg <- as.duration(mean(time_taken_filteredToSixty$times))
 # make a label with the average, to place on the plot
 text_for_plot_avg <- paste0("Average = ", round(test_lengths_avg, digits = 2))
 
-ggplot(data = time_taken, aes(x = time_taken$times)) +
+#plot tests lasting <60 mins
+ggplot(data = time_taken_filteredToSixty, aes(x = time_taken_filteredToSixty$times)) +
   geom_bar(fill = "blue", width = 0.5) +
-  geom_vline(xintercept = mean(time_taken$times), color = "red") +
-  labs(title = "Times taken to complete the SEAT") +
+  geom_vline(xintercept = mean(time_taken_filteredToSixty$times), color = "red") +
+  labs(title = "Times taken to complete the SEAT (<60 mins)") +
   labs(x = "Length of Test", y = "Count of Tests") +
-  annotate("text", x = 35, y = 75, label = text_for_plot_avg) +
+  annotate("text", x = 35, y = 60, label = text_for_plot_avg) +
   scale_x_continuous(breaks = seq(from = 0,
-                                      to = ceiling(max(time_taken$times)) + 10, by = 5)) +
+                                      to = ceiling(max(time_taken_filteredToSixty$times)) + 10, by = 5)) +
   scale_y_continuous(breaks = seq(from = 0, to = 100, by = 25))
+
+
+
+# COUNT OF TESTS TODAY BY SEDE (NEED TO USE THE 'times_finished' object, created above) #
+#using the time_testsDone dataframe that was created at the start
+#now to start the count. first to strip the hours from the timestamp
+count_testsDoneToday <- time_testsDone
+count_testsDoneToday <- count_testsDoneToday %>%
+  filter(firstQ == format(Sys.Date())) %>%
+  count(sede) %>%
+  rename(Count = n) %>%
+  arrange(desc(Count))
+count_testsDoneToday
+
+
+# TESTS TAKEN OVER TIME (BAR PLOT) #
+tests_overTime <- df[!duplicated(df$testCode), ] %>%
+                  rename(Date = firstQ) %>%
+                  arrange(Date) %>%
+                  mutate(Test_Number = row_number())    ## filter, change DT format, reorder
+
+plot_TestsOverTime <- ggplot(data = tests_overTime, aes(x = Date, y = Test_Number)) +
+                    geom_line(color = "blue") +
+                    geom_point(shape = 20, size = 0.5) +
+                    scale_x_datetime(breaks = date_breaks("1 months"),
+                                     labels = date_format(format = "%b")) +
+                    labs(title = paste0("Tests completed over time", " (", count_tests, " tests)")) +
+                    labs(x = "Time", y = "Total Tests")
+plot_TestsOverTime
+
+
+#ISOLATE HIGHEST AND LOWEST TIMES TAKEN TO COMPLETE (<10mins, >60mins)
+tests_shortAndLong <- df[!duplicated(df$testCode), ] %>%
+  filter(minutesToComplete < 11 | minutesToComplete > 60) %>%
+  select(c("testCode", "sede", "lastQ", "finishedSameDay", "minutesToComplete")) %>%
+  arrange(sede)
+
+
+
+
+# COUNT OF TESTS BY SEDE #
+count_bySede <- df %>%
+                  group_by(sede) %>%
+                  summarise(n_distinct(testCode)) %>%
+                  rename(Count = `n_distinct(testCode)`) %>%
+                  arrange(Count)    ## new df filtered by test code, counts by sede
+
+plot_countBySede <- ggplot(data = count_bySede, aes(x = reorder(sede, -Count), y = Count)) +
+                          geom_bar(stat = "identity", fill = "steelblue") +
+                          geom_text(aes(label = Count), vjust = -0.3, size = 3.5) +
+                          labs(title = "Number of tests completed by sede") +
+                          labs(x = "Sede", y = "Number of Tests") +
+                          theme(axis.text.x = element_text(angle = 35, hjust = 1))
+plot_countBySede
 
 
 # FLUENCY CHECK DONE/NOT DONE #
@@ -365,10 +425,6 @@ annotate_figure(section_times_plot,
                   top = text_grob("Time taken to complete each section",
                     color = "red", face = "bold", size = 12))
 
-## NUMBER OF QUESTIONS ASKED PER TEST SECTION ##
-##WIP##
-
-
-
+## NUMBER OF QUESTIONS ASKED PER TEST SECTION ## (WIP)
 
 
